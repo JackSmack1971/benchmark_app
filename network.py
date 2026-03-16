@@ -1,29 +1,27 @@
 """
-network.py — Network I/O Module
-────────────────────────────────
-Dedicated strictly to HTTP interactions with the OpenRouter API.
+network.py — Asynchronous Network I/O Module
+─────────────────────────────────────────────
+High-performance async HTTP interactions with the OpenRouter API.
 
 Responsibilities:
-  • Maintain a persistent `requests.Session()` with connection pooling
-  • Mount `HTTPAdapter` with `urllib3.util.Retry` for transient error recovery
-  • Fetch and parse available free models into typed `ModelInfo` objects
-  • Execute streaming benchmarks with TTFT capture and cancellation support
-  • Provide header construction with dynamically injected API keys
+  • Maintain a persistent `httpx.AsyncClient` for async socket multiplexing
+  • Execute asynchronous fetch and parsing of free models
+  • Stream remote LLM computations without blocking the main event loop
+  • Implement native async exponential backoff for HTTP 429/5xx absorption
+  • Respond to instantaneous cancellation flags
 
-This module imports ONLY from `config` (internal) and stdlib/requests (external).
-It never imports Gradio, Pandas, Plotly, or accesses global environment state.
+This module imports ONLY from `config` (internal), `httpx`, and `asyncio`.
+It completely avoids synchronous OS-thread blocking operations.
 """
 
 from __future__ import annotations
 
 import json
 import time
-import threading
+import asyncio
 from typing import Optional
 
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import httpx
 
 from config import (
     OPENROUTER_BASE,
@@ -39,39 +37,22 @@ from config import (
 )
 
 
-# ── Persistent Session Factory ──────────────────────────────────────────────
+# ── Persistent Async Client Factory ─────────────────────────────────────────
 
-def _build_session() -> requests.Session:
+def _build_async_client() -> httpx.AsyncClient:
     """
-    Construct a requests.Session with:
-      • Connection pooling (automatic via Session)
-      • Retry on transient HTTP errors with exponential backoff
-      • Explicit timeout defaults baked into the adapter
+    Construct a persistent HTTPX AsyncClient with:
+      • Native TCP connection pooling
+      • Strict timeout tuples mapped to connection vs. read phases
     """
-    session = requests.Session()
-
-    retry_strategy = Retry(
-        total=RETRY_TOTAL,
-        backoff_factor=RETRY_BACKOFF_FACTOR,
-        status_forcelist=RETRY_STATUS_FORCELIST,
-        allowed_methods=["GET", "POST"],
-        raise_on_status=False,
-    )
-
-    adapter = HTTPAdapter(
-        max_retries=retry_strategy,
-        pool_connections=10,
-        pool_maxsize=20,
-    )
-
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-
-    return session
+    limits = httpx.Limits(max_connections=20, max_keepalive_connections=10)
+    timeout = httpx.Timeout(SESSION_READ_TIMEOUT, connect=SESSION_CONNECT_TIMEOUT)
+    
+    return httpx.AsyncClient(limits=limits, timeout=timeout)
 
 
-# Module-level singleton — reused across all requests for TCP socket pooling.
-_session: requests.Session = _build_session()
+# Module-level singleton — multiplexes all network I/O over a single thread.
+_client: httpx.AsyncClient = _build_async_client()
 
 
 def _get_headers(api_key: str) -> dict[str, str]:
@@ -82,51 +63,45 @@ def _get_headers(api_key: str) -> dict[str, str]:
     return headers
 
 
-# ── Model Discovery ─────────────────────────────────────────────────────────
+# ── Model Discovery (Async) ─────────────────────────────────────────────────
 
-def fetch_free_models(api_key: str) -> list[ModelInfo]:
+async def fetch_free_models(api_key: str) -> list[ModelInfo]:
     """
-    Query OpenRouter /models, filter to free text-capable models,
-    and return typed ModelInfo objects sorted alphabetically.
-
-    Args:
-        api_key: The user's specific API key for this session.
-
-    Returns:
-        List of ModelInfo on success.
-
-    Raises:
-        RuntimeError: On network or parsing failure (caller must handle).
+    Asynchronously query OpenRouter /models and filter to free text models.
     """
-    try:
-        resp = _session.get(
-            f"{OPENROUTER_BASE}/models",
-            headers=_get_headers(api_key),
-            timeout=(SESSION_CONNECT_TIMEOUT, SESSION_READ_TIMEOUT),
-        )
-        resp.raise_for_status()
-        data = resp.json().get("data", [])
-    except requests.exceptions.Timeout as exc:
-        raise RuntimeError(
-            f"Model fetch timed out after {SESSION_READ_TIMEOUT}s: {exc}"
-        ) from exc
-    except requests.exceptions.ConnectionError as exc:
-        raise RuntimeError(f"Connection failed: {exc}") from exc
-    except requests.exceptions.HTTPError as exc:
-        raise RuntimeError(f"HTTP error {resp.status_code}: {exc}") from exc
-    except requests.exceptions.RequestException as exc:
-        raise RuntimeError(f"Request failed: {exc}") from exc
-    except (ValueError, KeyError) as exc:
-        raise RuntimeError(f"Failed to parse model response: {exc}") from exc
+    for attempt in range(RETRY_TOTAL + 1):
+        try:
+            resp = await _client.get(
+                f"{OPENROUTER_BASE}/models",
+                headers=_get_headers(api_key),
+            )
+            resp.raise_for_status()
+            data = resp.json().get("data", [])
+            break  # Success, exit retry loop
+            
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in RETRY_STATUS_FORCELIST or attempt == RETRY_TOTAL:
+                raise RuntimeError(f"HTTP error {exc.response.status_code}: {exc}") from exc
+            await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+            
+        except httpx.TimeoutException as exc:
+            if attempt == RETRY_TOTAL:
+                raise RuntimeError(f"Model fetch timed out: {exc}") from exc
+            await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+            
+        except httpx.RequestError as exc:
+            if attempt == RETRY_TOTAL:
+                raise RuntimeError(f"Connection failed: {exc}") from exc
+            await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+            
+        except (ValueError, KeyError) as exc:
+            raise RuntimeError(f"Failed to parse model response: {exc}") from exc
 
     free_models: list[ModelInfo] = []
 
     for m in data:
         pricing = m.get("pricing", {})
-        prompt_price = str(pricing.get("prompt", "1"))
-        completion_price = str(pricing.get("completion", "1"))
-
-        if prompt_price != "0" or completion_price != "0":
+        if str(pricing.get("prompt", "1")) != "0" or str(pricing.get("completion", "1")) != "0":
             continue
 
         modality = m.get("architecture", {}).get("modality", "")
@@ -139,9 +114,9 @@ def fetch_free_models(api_key: str) -> list[ModelInfo]:
     return free_models
 
 
-# ── Streaming Benchmark Runner ──────────────────────────────────────────────
+# ── Streaming Benchmark Runner (Async) ──────────────────────────────────────
 
-def run_single_benchmark(
+async def run_single_benchmark(
     api_key: str,
     model_id: str,
     model_name: str,
@@ -149,24 +124,12 @@ def run_single_benchmark(
     max_tokens: int,
     temperature: float,
     top_p: float,
-    cancel_event: threading.Event,
+    cancel_flag: list[bool],
     suite_label: str = "",
 ) -> BenchmarkResult:
     """
-    Execute a single streaming benchmark against one model.
-
-    Captures:
-      • Total latency (wall-clock, request → last token)
-      • Time To First Token (TTFT)
-      • Token counts (API-reported or estimated)
-      • Full response text
-
-    Args:
-        api_key: The user's specific API key.
-        cancel_event: Session-scoped event to abort in-flight streams safely.
-
-    Returns:
-        BenchmarkResult with either valid metrics or an error field set.
+    Execute a single streaming benchmark asynchronously.
+    Yields control to the event loop during network I/O waits.
     """
     payload: dict = {
         "model": model_id,
@@ -182,69 +145,80 @@ def run_single_benchmark(
     full_response: str = ""
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    
+    stream_timeout = httpx.Timeout(STREAM_READ_TIMEOUT, connect=SESSION_CONNECT_TIMEOUT)
+    req = _client.build_request("POST", f"{OPENROUTER_BASE}/chat/completions", headers=_get_headers(api_key), json=payload)
 
     try:
-        resp = _session.post(
-            f"{OPENROUTER_BASE}/chat/completions",
-            headers=_get_headers(api_key),
-            json=payload,
-            stream=True,
-            timeout=(SESSION_CONNECT_TIMEOUT, STREAM_READ_TIMEOUT),
-        )
-        resp.raise_for_status()
-
-        for raw_line in resp.iter_lines():
-            # ── Cancellation check (per-chunk granularity) ──────────
-            if cancel_event.is_set():
-                resp.close()
+        # ── Async Exponential Backoff Phase ──
+        resp = None
+        for attempt in range(RETRY_TOTAL + 1):
+            if cancel_flag[0]:
                 raise _CancelledError("Cancelled by user")
-
-            if not raw_line:
-                continue
-
-            decoded: str = raw_line.decode("utf-8", errors="replace")
-            if not decoded.startswith("data: "):
-                continue
-
-            data_str: str = decoded[6:].strip()
-            if data_str == "[DONE]":
-                break
-
+                
             try:
-                chunk: dict = json.loads(data_str)
-            except json.JSONDecodeError:
-                continue
+                resp = await _client.send(req, stream=True, timeout=stream_timeout)
+                resp.raise_for_status()
+                break  # Headers received successfully
+                
+            except httpx.HTTPStatusError as exc:
+                if resp: await resp.aclose()
+                if exc.response.status_code not in RETRY_STATUS_FORCELIST or attempt == RETRY_TOTAL:
+                    raise
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
+                
+            except (httpx.ConnectError, httpx.TimeoutException) as exc:
+                if resp: await resp.aclose()
+                if attempt == RETRY_TOTAL:
+                    raise
+                await asyncio.sleep(RETRY_BACKOFF_FACTOR * (2 ** attempt))
 
-            # ── Extract content delta ───────────────────────────────
-            choices = chunk.get("choices", [])
-            if choices:
-                delta = choices[0].get("delta", {})
-                content = delta.get("content", "")
-                if content:
-                    if ttft is None:
-                        ttft = time.perf_counter() - start_time
-                    full_response += content
+        # ── Async Stream Processing Phase ──
+        if not resp:
+            raise RuntimeError("Failed to obtain response object.")
 
-            # ── Extract usage (often arrives in final chunk) ────────
-            usage = chunk.get("usage", {})
-            if usage:
-                prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                completion_tokens = usage.get(
-                    "completion_tokens", completion_tokens
-                )
+        try:
+            async for raw_line in resp.aiter_lines():
+                if cancel_flag[0]:
+                    raise _CancelledError("Cancelled by user")
+
+                if not raw_line or not raw_line.startswith("data: "):
+                    continue
+
+                data_str: str = raw_line[6:].strip()
+                if data_str == "[DONE]":
+                    break
+
+                try:
+                    chunk: dict = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+
+                choices = chunk.get("choices", [])
+                if choices:
+                    content = choices[0].get("delta", {}).get("content", "")
+                    if content:
+                        if ttft is None:
+                            ttft = time.perf_counter() - start_time
+                        full_response += content
+
+                usage = chunk.get("usage", {})
+                if usage:
+                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                    completion_tokens = usage.get("completion_tokens", completion_tokens)
+        finally:
+            await resp.aclose()
 
         end_time: float = time.perf_counter()
         latency: float = end_time - start_time
 
-        # ── Fallback token estimation when API omits usage ──────────
+        # Fallback estimations
         if completion_tokens == 0:
             completion_tokens = max(1, len(full_response.split()) * 4 // 3)
         if prompt_tokens == 0:
             prompt_tokens = max(1, len(prompt.split()) * 4 // 3)
 
-        tokens_per_sec: float = (
-            round(completion_tokens / latency, 1) if latency > 0 else 0.0
-        )
+        tokens_per_sec: float = round(completion_tokens / latency, 1) if latency > 0 else 0.0
 
         return BenchmarkResult(
             model_id=model_id,
@@ -264,88 +238,22 @@ def run_single_benchmark(
         )
 
     except _CancelledError:
-        end_time = time.perf_counter()
         return BenchmarkResult(
-            model_id=model_id,
-            model_name=model_name,
-            prompt=prompt,
-            response=full_response.strip(),
-            latency_sec=round(end_time - start_time, 3),
-            ttft_sec=round(ttft, 3) if ttft is not None else None,
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            tokens_per_sec=0.0,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens_cfg=max_tokens,
-            error="Cancelled by user",
-            suite_label=suite_label,
-        )
-
-    except requests.exceptions.Timeout as exc:
-        end_time = time.perf_counter()
-        return BenchmarkResult(
-            model_id=model_id,
-            model_name=model_name,
-            prompt=prompt,
-            response="",
-            latency_sec=round(end_time - start_time, 3),
-            ttft_sec=None,
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            tokens_per_sec=0.0,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens_cfg=max_tokens,
-            error=f"Timeout: {exc}",
-            suite_label=suite_label,
-        )
-
-    except requests.exceptions.ConnectionError as exc:
-        end_time = time.perf_counter()
-        return BenchmarkResult(
-            model_id=model_id,
-            model_name=model_name,
-            prompt=prompt,
-            response="",
-            latency_sec=round(end_time - start_time, 3),
-            ttft_sec=None,
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            tokens_per_sec=0.0,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens_cfg=max_tokens,
-            error=f"Connection error: {exc}",
-            suite_label=suite_label,
+            model_id=model_id, model_name=model_name, prompt=prompt, response=full_response.strip(),
+            latency_sec=round(time.perf_counter() - start_time, 3), ttft_sec=round(ttft, 3) if ttft is not None else None,
+            prompt_tokens=0, completion_tokens=0, total_tokens=0, tokens_per_sec=0.0,
+            temperature=temperature, top_p=top_p, max_tokens_cfg=max_tokens, error="Cancelled by user", suite_label=suite_label,
         )
 
     except Exception as exc:
-        end_time = time.perf_counter()
         return BenchmarkResult(
-            model_id=model_id,
-            model_name=model_name,
-            prompt=prompt,
-            response="",
-            latency_sec=round(end_time - start_time, 3),
-            ttft_sec=None,
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
-            tokens_per_sec=0.0,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens_cfg=max_tokens,
-            error=str(exc)[:200],
-            suite_label=suite_label,
+            model_id=model_id, model_name=model_name, prompt=prompt, response="",
+            latency_sec=round(time.perf_counter() - start_time, 3), ttft_sec=None,
+            prompt_tokens=0, completion_tokens=0, total_tokens=0, tokens_per_sec=0.0,
+            temperature=temperature, top_p=top_p, max_tokens_cfg=max_tokens, error=str(exc)[:200], suite_label=suite_label,
         )
 
 
-# ── Internal Exception ──────────────────────────────────────────────────────
-
 class _CancelledError(Exception):
-    """Raised internally when the cancellation event fires mid-stream."""
+    """Raised internally when the cancellation flag is toggled mid-stream."""
     pass
