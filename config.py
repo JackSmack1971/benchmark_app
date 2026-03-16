@@ -10,8 +10,7 @@ internal (stdlib + dataclass only).
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,7 +18,6 @@ from typing import Optional
 # ── Environment & API ───────────────────────────────────────────────────────
 
 OPENROUTER_BASE: str = "https://openrouter.ai/api/v1"
-OPENROUTER_API_KEY: str = os.environ.get("OPENROUTER_API_KEY", "")
 
 HEADERS_BASE: dict[str, str] = {
     "Content-Type": "application/json",
