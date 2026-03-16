@@ -6,25 +6,22 @@ Thin presentation and routing layer. Owns zero business logic.
 Responsibilities:
   • Define the Gradio Blocks layout (rows, columns, tabs, accordions)
   • Wire UI events to domain-module functions
-  • Manage gr.State for session-scoped variables
+  • Manage gr.State for session-scoped variables (API keys, caches, cancellation)
   • Provide gr.Progress feedback during benchmark runs
   • Orchestrate the benchmark execution loop (parallel/sequential dispatch)
 
 All data fetching, aggregation, visualization, export, and insight
-generation are delegated to their respective domain modules:
-  • network.py    — HTTP I/O, model discovery, streaming benchmarks
-  • processing.py — Pandas aggregation, stats, token estimation
-  • visualization.py — Plotly chart construction
-  • export.py     — CSV, JSON, Markdown serialization
-  • insights.py   — Natural-language summary engine
+generation are delegated to their respective domain modules.
 
 Architecture contract:
-  Requests (network) → Pandas (processing) → Plotly (visualization) → Gradio output
+  UI State → Requests (network) → Pandas (processing) → Plotly (visualization) → Gradio output
 """
 
 from __future__ import annotations
 
+import os
 import time
+import threading
 import concurrent.futures
 from datetime import datetime, timezone
 
@@ -32,7 +29,6 @@ import gradio as gr
 import pandas as pd
 
 from config import (
-    OPENROUTER_API_KEY,
     BENCHMARK_PRESETS,
     BENCHMARK_SUITES,
     METRIC_GLOSSARY,
@@ -42,11 +38,6 @@ from config import (
     BenchmarkResult,
 )
 from network import (
-    set_api_key,
-    get_api_key,
-    request_cancel,
-    reset_cancel,
-    is_cancelled,
     fetch_free_models,
     run_single_benchmark,
 )
@@ -80,77 +71,78 @@ from export import (
 from insights import generate_insights
 
 
-# ── Module-Level Model Cache ────────────────────────────────────────────────
-# Populated by refresh_models(), read by event handlers.
-# Not shared across users — Gradio 6+ queues requests per-session.
-
-_cached_models: list[ModelInfo] = []
-_all_providers: list[str] = []
-
-
 # ── Event Handlers (thin wrappers delegating to domain modules) ─────────────
 
-def handle_set_api_key(key: str) -> str:
-    """Delegate API key storage to network module."""
-    set_api_key(key)
+def handle_key_status_update(key: str) -> str:
+    """Provide immediate UI feedback for API key presence."""
     return "✅ Key set" if key.strip() else "⚠️ No key"
 
 
-def handle_refresh_models() -> tuple:
+def handle_refresh_models(api_key: str) -> tuple:
     """
-    Fetch free models via network module, populate module cache,
-    and return Gradio component updates for model selector + provider filter.
+    Fetch free models via the isolated network module, inject them into
+    session-scoped state, and return Gradio component updates.
     """
-    global _cached_models, _all_providers
+    if not api_key.strip():
+        return (
+            gr.update(choices=[], value=[]),
+            gr.update(choices=[], value=[]),
+            "⚠️ Please set your API key first.",
+            [],  # Empty model cache state
+            [],  # Empty provider cache state
+        )
 
     try:
-        _cached_models = fetch_free_models()
+        models = fetch_free_models(api_key)
     except RuntimeError as exc:
         return (
             gr.update(choices=[], value=[]),
             gr.update(choices=[], value=[]),
             f"❌ Error: {exc}",
+            [],
+            [],
         )
 
-    _all_providers = sorted(set(m.provider for m in _cached_models))
-
-    model_choices = [
-        (f"{m.name}  [{m.provider}]", m.id) for m in _cached_models
-    ]
-    provider_choices = [
-        (p.title(), p) for p in _all_providers
-    ]
+    providers = sorted(set(m.provider for m in models))
+    model_choices = [(f"{m.name}  [{m.provider}]", m.id) for m in models]
+    provider_choices = [(p.title(), p) for p in providers]
 
     return (
         gr.update(choices=model_choices, value=[]),
         gr.update(choices=provider_choices, value=[]),
-        f"✅ {len(_cached_models)} free models · {len(_all_providers)} providers",
+        f"✅ {len(models)} free models · {len(providers)} providers",
+        models,
+        providers,
     )
 
 
-def handle_filter_by_provider(providers: list[str]) -> dict:
-    """Filter model selector choices by selected providers."""
+def handle_filter_by_provider(
+    providers: list[str],
+    cached_models: list[ModelInfo]
+) -> dict:
+    """Filter model selector choices against session-scoped model cache."""
     if not providers:
-        choices = [
-            (f"{m.name}  [{m.provider}]", m.id) for m in _cached_models
-        ]
+        choices = [(f"{m.name}  [{m.provider}]", m.id) for m in cached_models]
     else:
         choices = [
             (f"{m.name}  [{m.provider}]", m.id)
-            for m in _cached_models
+            for m in cached_models
             if m.provider in providers
         ]
     return gr.update(choices=choices, value=[])
 
 
-def handle_model_info(selected_ids: list[str]) -> str:
-    """Build model spec cards for the info display area."""
+def handle_model_info(
+    selected_ids: list[str],
+    cached_models: list[ModelInfo]
+) -> str:
+    """Build model spec cards for the info display area from session cache."""
     if not selected_ids:
         return "*Select models to see specs.*"
 
     parts: list[str] = []
     for sid in selected_ids:
-        model = next((m for m in _cached_models if m.id == sid), None)
+        model = next((m for m in cached_models if m.id == sid), None)
         if model:
             parts.append(
                 f"**{model.name}** · `{model.id}`\n"
@@ -169,9 +161,13 @@ def handle_preset_change(preset_name: str) -> tuple[str, float, float]:
     return prompt, temp, top_p
 
 
-def handle_cancel() -> dict:
-    """Signal cancellation to the network module."""
-    request_cancel()
+def handle_cancel(cancel_list: list[threading.Event]) -> dict:
+    """
+    Trigger the session-scoped cancellation event.
+    The list wrapper ensures we target only the active thread for this user.
+    """
+    for event in cancel_list:
+        event.set()
     return gr.update(interactive=False, value="⏳ Cancelling...")
 
 
@@ -228,6 +224,7 @@ def _empty_outputs(
 # ── Main Benchmark Orchestrator ─────────────────────────────────────────────
 
 def run_benchmark(
+    api_key: str,
     selected_models: list[str],
     prompt_text: str,
     max_tokens: float,
@@ -238,30 +235,21 @@ def run_benchmark(
     blind_mode: bool,
     suite_name: str | None,
     prompt_history: list[str],
+    cached_models: list[ModelInfo],
+    cancel_list: list[threading.Event],
     progress: gr.Progress = gr.Progress(track_tqdm=False),
 ):
     """
-    Main benchmark orchestrator with suite support, blind mode,
-    parallel/sequential dispatch, and cancellation.
-
-    This is a Gradio generator function (yields intermediate progress).
-
-    Yields:
-        13-element tuples matching the output component list.
-
-    Data flow per iteration:
-        network.run_single_benchmark()
-          → processing.aggregate_stats()
-            → processing.build_leaderboard_rows()
-              → visualization.build_*_chart()
-              → insights.generate_insights()
-              → export.export_results_*()
-                → Gradio output components
+    Main benchmark orchestrator mapping strictly parameterized configurations
+    to domain execution layers.
     """
-    reset_cancel()
+    # ── Session Cancellation Initialization ─────────────────────────────
+    cancel_event = threading.Event()
+    cancel_list.clear()
+    cancel_list.append(cancel_event)
 
     # ── Validation ──────────────────────────────────────────────────────
-    if not get_api_key():
+    if not api_key.strip():
         yield _empty_outputs("⚠️ Set your API key first.", prompt_history)
         return
 
@@ -289,7 +277,7 @@ def run_benchmark(
 
     # ── Build model lookup for blind mode reveal ────────────────────────
     model_lookup: dict[str, str] = {}
-    for m in _cached_models:
+    for m in cached_models:
         model_lookup[m.id] = m.name
 
     # ── Name resolver (blind or open) ───────────────────────────────────
@@ -364,12 +352,14 @@ def run_benchmark(
         _run_idx: int,
     ) -> BenchmarkResult:
         return run_single_benchmark(
+            api_key=api_key,
             model_id=model_id,
             model_name=name_for(model_id),
             prompt=prompt,
             max_tokens=max_tok,
             temperature=temperature,
             top_p=top_p,
+            cancel_event=cancel_event,
             suite_label=label,
         )
 
@@ -399,13 +389,13 @@ def run_benchmark(
             max_workers=worker_count,
         ) as pool:
             for args in task_args:
-                if is_cancelled():
+                if cancel_event.is_set():
                     break
                 future = pool.submit(execute_run, *args)
                 futures[future] = args
 
             for future in concurrent.futures.as_completed(futures):
-                if is_cancelled():
+                if cancel_event.is_set():
                     log_lines.append("\n### ⛔ Cancelled by user")
                     break
 
@@ -422,7 +412,7 @@ def run_benchmark(
                 yield make_progress_yield()
     else:
         for args in task_args:
-            if is_cancelled():
+            if cancel_event.is_set():
                 log_lines.append("\n### ⛔ Cancelled by user")
                 break
 
@@ -437,6 +427,9 @@ def run_benchmark(
             )
             yield make_progress_yield()
 
+    # Clean up cancellation list for next run
+    cancel_list.clear()
+
     # ── No results guard ────────────────────────────────────────────────
     if not all_results:
         yield _empty_outputs("No results collected.", prompt_history)
@@ -447,33 +440,24 @@ def run_benchmark(
         reveal_blind_results(all_results, model_lookup)
 
     # ── Aggregation pipeline ────────────────────────────────────────────
-    #   network results → processing → visualization/insights/export
     model_stats = aggregate_stats(all_results)
     rows = build_leaderboard_rows(model_stats)
-
-    # Processing → Pandas DataFrame (PyArrow-backed)
     leaderboard_df = build_leaderboard_dataframe(rows)
-
-    # Processing → Markdown
     sidebyside_md = build_sidebyside_markdown(model_stats)
-
-    # Insights
     insight_text = generate_insights(rows)
 
-    # Visualization (Plotly Figures)
     bar_fig = build_bar_chart(model_stats)
     scatter_fig = build_scatter_chart(model_stats)
     consistency_fig = build_consistency_chart(model_stats)
     radar_fig = build_radar_chart(rows)
 
-    # Export
     csv_data = export_results_csv(all_results)
     json_data = export_results_json(all_results)
     share_md = build_share_markdown(rows, insight_text)
 
     # ── Final log entry ─────────────────────────────────────────────────
     elapsed_total = round(time.perf_counter() - start_wall, 1)
-    cancelled_tag = " (partial — cancelled)" if is_cancelled() else ""
+    cancelled_tag = " (partial — cancelled)" if cancel_event.is_set() else ""
     log_lines.append(
         f"\n### ✅ Complete{cancelled_tag} — "
         f"{elapsed_total}s total — {len(all_results)} results"
@@ -505,20 +489,23 @@ def run_benchmark(
 def build_app() -> gr.Blocks:
     """
     Construct and return the complete Gradio Blocks application.
-
-    The app object is returned (not launched) so that run.py can
-    configure launch parameters independently.
+    Enforces strict session-scoped gr.State objects for all dependencies.
     """
+    default_api_key = os.environ.get("OPENROUTER_API_KEY", "")
+
     with gr.Blocks(
         title="OpenRouter Free Model Benchmarker v3",
         css=CSS,
     ) as app:
 
-        # ── Session State ───────────────────────────────────────────────
+        # ── Strict Session States ───────────────────────────────────────
         prompt_history_state = gr.State([])
         csv_state = gr.State("")
         json_state = gr.State("")
         share_md_state = gr.State("")
+        model_cache_state = gr.State([])
+        provider_cache_state = gr.State([])
+        cancel_state = gr.State([])
 
         # ── Header ──────────────────────────────────────────────────────
         gr.Markdown(
@@ -529,14 +516,14 @@ def build_app() -> gr.Blocks:
 
         # ── API Key ────────────────────────────────────────────────────
         with gr.Accordion(
-            "🔑 API Key", open=not bool(OPENROUTER_API_KEY)
+            "🔑 API Key", open=not bool(default_api_key)
         ):
             with gr.Row():
                 api_key_input = gr.Textbox(
                     label="OpenRouter API Key",
                     type="password",
                     placeholder="sk-or-v1-...",
-                    value=OPENROUTER_API_KEY,
+                    value=default_api_key,
                     info=(
                         "Free tier works — "
                         "https://openrouter.ai/settings/keys"
@@ -549,13 +536,15 @@ def build_app() -> gr.Blocks:
                     scale=1,
                     value=(
                         "✅ Loaded from env"
-                        if OPENROUTER_API_KEY
+                        if default_api_key
                         else "⚠️ No key"
                     ),
                 )
 
             api_key_input.change(
-                handle_set_api_key, api_key_input, key_status
+                handle_key_status_update,
+                inputs=[api_key_input],
+                outputs=[key_status]
             )
 
         # ── Model Discovery ─────────────────────────────────────────────
@@ -588,15 +577,24 @@ def build_app() -> gr.Blocks:
 
         refresh_btn.click(
             handle_refresh_models,
-            outputs=[model_selector, provider_filter, model_status],
+            inputs=[api_key_input],
+            outputs=[
+                model_selector,
+                provider_filter,
+                model_status,
+                model_cache_state,
+                provider_cache_state
+            ],
         )
         provider_filter.change(
             handle_filter_by_provider,
-            provider_filter,
-            model_selector,
+            inputs=[provider_filter, model_cache_state],
+            outputs=[model_selector],
         )
         model_selector.change(
-            handle_model_info, model_selector, model_info_display
+            handle_model_info,
+            inputs=[model_selector, model_cache_state],
+            outputs=[model_info_display]
         )
 
         # ── Configuration ───────────────────────────────────────────────
@@ -640,8 +638,8 @@ def build_app() -> gr.Blocks:
         prompt_input.change(estimate_tokens, prompt_input, token_counter)
         history_dropdown.change(
             lambda x: x if x else "",
-            history_dropdown,
-            prompt_input,
+            inputs=[history_dropdown],
+            outputs=[prompt_input],
         )
 
         with gr.Row():
@@ -687,8 +685,8 @@ def build_app() -> gr.Blocks:
 
         preset_dropdown.change(
             handle_preset_change,
-            preset_dropdown,
-            [prompt_input, temperature_slider, top_p_slider],
+            inputs=[preset_dropdown],
+            outputs=[prompt_input, temperature_slider, top_p_slider],
         )
 
         with gr.Row():
@@ -778,11 +776,15 @@ def build_app() -> gr.Blocks:
 
         export_btn.click(
             handle_export,
-            [csv_state, json_state],
-            [csv_download, json_download],
+            inputs=[csv_state, json_state],
+            outputs=[csv_download, json_download],
         )
 
-        cancel_btn.click(handle_cancel, outputs=[cancel_btn])
+        cancel_btn.click(
+            handle_cancel,
+            inputs=[cancel_state],
+            outputs=[cancel_btn]
+        )
 
         run_btn.click(
             normalize_suite,
@@ -791,6 +793,7 @@ def build_app() -> gr.Blocks:
         ).then(
             run_benchmark,
             inputs=[
+                api_key_input,
                 model_selector,
                 prompt_input,
                 max_tokens_slider,
@@ -801,6 +804,8 @@ def build_app() -> gr.Blocks:
                 blind_mode_check,
                 suite_dropdown,
                 prompt_history_state,
+                model_cache_state,
+                cancel_state,
             ],
             outputs=[
                 log_output,
