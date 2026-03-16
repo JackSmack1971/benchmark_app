@@ -8,10 +8,10 @@ Responsibilities:
   • Mount `HTTPAdapter` with `urllib3.util.Retry` for transient error recovery
   • Fetch and parse available free models into typed `ModelInfo` objects
   • Execute streaming benchmarks with TTFT capture and cancellation support
-  • Provide header construction with dynamic API key injection
+  • Provide header construction with dynamically injected API keys
 
 This module imports ONLY from `config` (internal) and stdlib/requests (external).
-It never imports Gradio, Pandas, or Plotly.
+It never imports Gradio, Pandas, Plotly, or accesses global environment state.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from urllib3.util.retry import Retry
 
 from config import (
     OPENROUTER_BASE,
-    OPENROUTER_API_KEY,
     HEADERS_BASE,
     SESSION_CONNECT_TIMEOUT,
     SESSION_READ_TIMEOUT,
@@ -38,45 +37,6 @@ from config import (
     BenchmarkResult,
     ModelInfo,
 )
-
-
-# ── Module-Level API Key (mutable at runtime via UI) ────────────────────────
-
-_api_key: str = OPENROUTER_API_KEY
-_api_key_lock: threading.Lock = threading.Lock()
-
-
-def set_api_key(key: str) -> None:
-    """Thread-safe API key update from the UI layer."""
-    global _api_key
-    with _api_key_lock:
-        _api_key = key.strip()
-
-
-def get_api_key() -> str:
-    """Thread-safe API key read."""
-    with _api_key_lock:
-        return _api_key
-
-
-# ── Cancellation Primitive ──────────────────────────────────────────────────
-
-_cancel_event: threading.Event = threading.Event()
-
-
-def request_cancel() -> None:
-    """Signal all in-flight benchmarks to abort."""
-    _cancel_event.set()
-
-
-def reset_cancel() -> None:
-    """Clear the cancellation flag before a new benchmark run."""
-    _cancel_event.clear()
-
-
-def is_cancelled() -> bool:
-    """Check cancellation state without blocking."""
-    return _cancel_event.is_set()
 
 
 # ── Persistent Session Factory ──────────────────────────────────────────────
@@ -110,25 +70,27 @@ def _build_session() -> requests.Session:
     return session
 
 
-# Module-level singleton — reused across all requests for pooling benefits.
+# Module-level singleton — reused across all requests for TCP socket pooling.
 _session: requests.Session = _build_session()
 
 
-def _get_headers() -> dict[str, str]:
-    """Build request headers with current API key injected."""
+def _get_headers(api_key: str) -> dict[str, str]:
+    """Build request headers with the explicitly injected API key."""
     headers = HEADERS_BASE.copy()
-    key = get_api_key()
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
     return headers
 
 
 # ── Model Discovery ─────────────────────────────────────────────────────────
 
-def fetch_free_models() -> list[ModelInfo]:
+def fetch_free_models(api_key: str) -> list[ModelInfo]:
     """
     Query OpenRouter /models, filter to free text-capable models,
     and return typed ModelInfo objects sorted alphabetically.
+
+    Args:
+        api_key: The user's specific API key for this session.
 
     Returns:
         List of ModelInfo on success.
@@ -139,7 +101,7 @@ def fetch_free_models() -> list[ModelInfo]:
     try:
         resp = _session.get(
             f"{OPENROUTER_BASE}/models",
-            headers=_get_headers(),
+            headers=_get_headers(api_key),
             timeout=(SESSION_CONNECT_TIMEOUT, SESSION_READ_TIMEOUT),
         )
         resp.raise_for_status()
@@ -180,12 +142,14 @@ def fetch_free_models() -> list[ModelInfo]:
 # ── Streaming Benchmark Runner ──────────────────────────────────────────────
 
 def run_single_benchmark(
+    api_key: str,
     model_id: str,
     model_name: str,
     prompt: str,
     max_tokens: int,
     temperature: float,
     top_p: float,
+    cancel_event: threading.Event,
     suite_label: str = "",
 ) -> BenchmarkResult:
     """
@@ -196,7 +160,10 @@ def run_single_benchmark(
       • Time To First Token (TTFT)
       • Token counts (API-reported or estimated)
       • Full response text
-      • Cancellation via shared threading.Event
+
+    Args:
+        api_key: The user's specific API key.
+        cancel_event: Session-scoped event to abort in-flight streams safely.
 
     Returns:
         BenchmarkResult with either valid metrics or an error field set.
@@ -219,7 +186,7 @@ def run_single_benchmark(
     try:
         resp = _session.post(
             f"{OPENROUTER_BASE}/chat/completions",
-            headers=_get_headers(),
+            headers=_get_headers(api_key),
             json=payload,
             stream=True,
             timeout=(SESSION_CONNECT_TIMEOUT, STREAM_READ_TIMEOUT),
@@ -228,7 +195,7 @@ def run_single_benchmark(
 
         for raw_line in resp.iter_lines():
             # ── Cancellation check (per-chunk granularity) ──────────
-            if _cancel_event.is_set():
+            if cancel_event.is_set():
                 resp.close()
                 raise _CancelledError("Cancelled by user")
 
