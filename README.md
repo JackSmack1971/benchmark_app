@@ -2,47 +2,10 @@
 
 Head-to-head benchmarking of free LLM models via [OpenRouter](https://openrouter.ai), built with Gradio.
 
-## Architecture
-
-```
-benchmark_app/
-├── __init__.py          # Package metadata
-├── config.py            # Constants, presets, suites, dataclasses
-├── network.py           # requests.Session + retry, model fetch, streaming
-├── processing.py        # PyArrow-backed Pandas aggregation, statistics
-├── visualization.py     # Plotly chart builders (bar, scatter, consistency, radar)
-├── export.py            # CSV, JSON, share-ready Markdown
-├── insights.py          # Natural-language insight generation
-├── app.py               # Thin Gradio UI — routing & presentation only
-├── run.py               # Entry point
-├── requirements.txt     # Pinned dependencies
-├── .env.example         # Environment variable template
-└── .gitignore           # Git ignore rules
-```
-
-**Data flow (unidirectional):**
-
-```
-network.py → processing.py (PyArrow) → visualization.py (Plotly) → app.py (Gradio)
-```
-
-**Module isolation:**
-
-| Module             | gradio | requests | pandas | plotly | config |
-|--------------------|:------:|:--------:|:------:|:------:|:------:|
-| `config.py`        |   ✗    |    ✗     |   ✗    |   ✗    |   —    |
-| `network.py`       |   ✗    |    ✅    |   ✗    |   ✗    |   ✅   |
-| `processing.py`    |   ✗    |    ✗     |   ✅   |   ✗    |   ✅   |
-| `visualization.py` |   ✗    |    ✗     |   ✗    |   ✅   |   ✅   |
-| `export.py`        |   ✗    |    ✗     |   ✗    |   ✗    |   ✅   |
-| `insights.py`      |   ✗    |    ✗     |   ✗    |   ✗    |   ✅   |
-| `app.py`           |   ✅   |    ✗     |   ✅   |   ✗    |   ✅   |
-| `run.py`           |   ✅   |    ✗     |   ✗    |   ✗    |   ✗    |
-
 ## Quick Start
 
 ```bash
-# Clone and enter the directory
+# Enter the directory
 cd benchmark_app
 
 # Create virtual environment
@@ -54,8 +17,8 @@ source .venv/bin/activate   # Linux/macOS
 pip install -r requirements.txt
 
 # Set your API key (free tier works)
-cp .env.example .env
-# Edit .env and add your key from https://openrouter.ai/settings/keys
+export OPENROUTER_API_KEY=sk-or-v1-...
+# Or create a .env file: echo "OPENROUTER_API_KEY=sk-or-v1-..." > .env
 
 # Launch
 python run.py
@@ -65,45 +28,104 @@ Open `http://localhost:7860` in your browser.
 
 ## Features
 
-- **Model Discovery** — Auto-fetch all free text models from OpenRouter
-- **Provider Filtering** — Filter by google, meta-llama, mistralai, etc.
-- **Benchmark Presets** — Quick Reasoning, Creative Writing, Code Gen, Math, and more
-- **Benchmark Suites** — Run multiple presets and average results
-- **Blind Mode** — Hide model names during runs, reveal after voting
-- **Parallel Execution** — ThreadPoolExecutor with configurable worker count
-- **Cancellation** — Abort mid-benchmark via threading.Event
-- **Smart Defaults** — Auto-set temperature/top_p based on prompt category
-- **Live Progress** — ETA estimation and per-run status updates
-- **5 Visualization Tabs:**
-  - Sortable leaderboard (PyArrow-backed DataFrame)
-  - Bar charts (latency, TTFT, throughput)
-  - Bubble scatter (TTFT vs throughput vs output size)
-  - Box plots (consistency across multi-run benchmarks)
-  - 5-axis radar (Speed, Responsiveness, Consistency, Output Volume, Reliability)
-- **Side-by-Side** — Compare model responses directly
-- **Insight Engine** — Auto-generated natural-language analysis
-- **Export** — CSV, JSON, and Reddit/Discord-ready Markdown
+### Model Discovery & Filtering
+- **Auto-discover free models** — one click fetches every free text model from OpenRouter and shows a count by provider
+- **Provider filter** — narrow down to google, meta-llama, mistralai, and others via a multi-select dropdown
+- **Model info** — select any model to see its context length, max output tokens, and modality before running
 
-## Environment Variables
+### Benchmark Configuration
+- **Custom prompt** — type any prompt directly; a live token counter shows an estimated cost
+- **8 built-in presets** — Quick Reasoning, Creative Writing, Code Generation, Summarization, Instruction Following, Chain of Thought, Technical Analysis, Math/Logic
+- **3 benchmark suites** — Full Reasoning Suite, Practical Suite, and All Presets; suites run multiple prompts and aggregate results across all of them
+- **Smart defaults** — selecting a preset automatically sets the recommended temperature and top-p for that category
+- **Prompt history** — previously used prompts are saved per session and available as a dropdown for quick re-use
+- **Runs per model** — run each model 1–10 times to collect variance and consistency data
+- **Temperature** (0.0–2.0) and **Top-p** (0.0–1.0) sliders with step controls
+- **Max tokens** — 32–4096, step 32
+- **Parallel execution** — runs all selected models concurrently via async tasks (toggle off for sequential)
+- **Blind mode** — hides model names as "Model #1", "Model #2", etc. during execution; names are revealed after the run completes
+
+### Benchmark Execution
+- Live progress bar with ETA estimation and per-run status in the log
+- Cancel button aborts all in-flight requests immediately
+
+### Results — 6 Tabs
+
+| Tab | What you see |
+|-----|-------------|
+| **📋 Leaderboard** | Sortable table: rank (🥇🥈🥉), model name, avg latency, σ latency, avg TTFT, avg tok/s, σ tok/s, CV%, avg tokens, error count, run count |
+| **📊 Charts** | Three-panel bar chart (latency, TTFT, throughput) and a WebGL-accelerated scatter plot (TTFT vs throughput, bubble size = token count) |
+| **🎯 Radar** | Five-axis normalized radar chart: Speed, Responsiveness, Consistency, Output Volume, Reliability |
+| **📈 Consistency** | Box plots showing latency and throughput distributions across runs (requires ≥ 2 runs per model) |
+| **🔀 Side-by-Side** | Direct response comparison across models (up to 4 pairs, truncated at 1 200 characters each) |
+| **📝 Live Log** | Timestamped per-run log with latency, tok/s, and any error messages |
+
+### Insight Engine
+After every run an auto-generated summary identifies the fastest throughput model, lowest-latency model (if different), best TTFT, most consistent model (multi-run only), output volume spread, and any models that produced errors.
+
+### Export & Sharing
+- **CSV** — 16-field export (timestamp, model IDs, all metrics, prompt, response)
+- **JSON** — pretty-printed array of all result objects
+- **Share-ready Markdown** — ranked table with medals and the insight summary, formatted for Reddit and Discord
+- Files are written to `/tmp/benchmark_results.{csv,json}` and offered as download links
+
+## Configuration
+
+### Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|:--------:|---------|-------------|
-| `OPENROUTER_API_KEY` | Yes | — | Your OpenRouter API key |
+| `OPENROUTER_API_KEY` | Yes | — | Your OpenRouter API key ([get one free](https://openrouter.ai/settings/keys)) |
 | `GRADIO_SERVER_NAME` | No | `0.0.0.0` | Server bind address |
 | `GRADIO_SERVER_PORT` | No | `7860` | Server port |
-| `GRADIO_SHARE` | No | `false` | Enable Gradio public share link |
+| `GRADIO_SHARE` | No | `false` | Set to `true` to generate a public Gradio share link |
 
-## Key Design Decisions
+The API key can also be entered directly in the UI's **🔑 API Key** accordion without restarting.
 
-**Persistent `requests.Session`** with `HTTPAdapter` + `urllib3.util.Retry` for connection pooling and exponential backoff on transient errors (429, 5xx).
+### Metric Glossary
 
-**Thread-safe API key mutation** via `threading.Lock` — eliminates race conditions during concurrent benchmark execution.
+| Metric | Definition |
+|:-------|:-----------|
+| **Latency** | Total wall-clock time from request to final token |
+| **TTFT** | Time To First Token — seconds until the first content chunk arrives |
+| **tok/s** | Throughput — completion tokens per second of total latency |
+| **σ (Std Dev)** | Standard deviation across runs |
+| **CV%** | Coefficient of Variation (σ / mean × 100) — normalized consistency |
+| **Radar axes** | Speed (1/latency), Responsiveness (1/TTFT), Consistency (1/CV%), Output Volume, Reliability (1 − error rate) — all normalized 0–100 |
 
-**PyArrow dtype backend** on all Pandas DataFrames for columnar memory layout, native nullable types (no NaN sentinel), and reduced memory footprint.
+## Architecture
 
-**Typed dataclasses** (`BenchmarkResult`, `ModelInfo`, `LeaderboardRow`) replace anonymous dicts throughout the pipeline — static analysis catches typos at write time, not runtime.
+```
+benchmark_app/
+├── config.py            # Constants, presets, suites, dataclasses
+├── network.py           # httpx.AsyncClient, model fetch, streaming
+├── processing.py        # PyArrow-backed Pandas aggregation, statistics
+├── visualization.py     # Plotly chart builders (bar, scatter, consistency, radar)
+├── export.py            # CSV, JSON, share-ready Markdown
+├── insights.py          # Natural-language insight generation
+├── app.py               # Thin Gradio UI — routing & presentation only
+├── run.py               # Entry point
+└── requirements.txt     # Pinned dependencies
+```
 
-**Gradio as thin shell** — `app.py` contains zero HTTP calls, zero statistics computations, zero chart construction, and zero serialization logic. Every domain concern is delegated to its respective module.
+**Data flow (unidirectional):**
+
+```
+network.py → processing.py (PyArrow) → visualization.py (Plotly) → app.py (Gradio)
+```
+
+**Module isolation matrix:**
+
+| Module | gradio | httpx | pandas | plotly | config |
+|---|:---:|:---:|:---:|:---:|:---:|
+| `config.py` | ✗ | ✗ | ✗ | ✗ | — |
+| `network.py` | ✗ | ✅ | ✗ | ✗ | ✅ |
+| `processing.py` | ✗ | ✗ | ✅ | ✗ | ✅ |
+| `visualization.py` | ✗ | ✗ | ✗ | ✅ | ✅ |
+| `export.py` | ✗ | ✗ | ✗ | ✗ | ✅ |
+| `insights.py` | ✗ | ✗ | ✗ | ✗ | ✅ |
+| `app.py` | ✅ | ✗ | ✅ | ✗ | ✅ |
+| `run.py` | ✅ | ✗ | ✗ | ✗ | ✗ |
 
 ## License
 
