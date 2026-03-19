@@ -37,6 +37,7 @@ from processing import (
     aggregate_stats,
     build_leaderboard_rows,
     build_leaderboard_dataframe,
+    build_category_breakdown,
     build_sidebyside_markdown,
     estimate_tokens,
     resolve_preset_prompt,
@@ -53,6 +54,8 @@ from visualization import (
     build_scatter_chart,
     build_consistency_chart,
     build_radar_chart,
+    build_category_chart,
+    build_drift_chart,
 )
 from export import (
     export_results_csv,
@@ -124,8 +127,8 @@ def normalize_suite(val: str) -> str | None:
     return val if val and val != "(none)" else None
 
 
-_OUT_LOG, _OUT_INSIGHT, _OUT_LEADERBOARD, _OUT_BAR, _OUT_SCATTER, _OUT_CONSISTENCY, _OUT_RADAR, _OUT_SIDEBYSIDE, _OUT_CSV, _OUT_JSON, _OUT_HISTORY, _OUT_SHARE_MD, _OUT_CANCEL_BTN = range(13)
-_NUM_OUTPUTS = 13
+_OUT_LOG, _OUT_INSIGHT, _OUT_LEADERBOARD, _OUT_BAR, _OUT_SCATTER, _OUT_CONSISTENCY, _OUT_RADAR, _OUT_CATEGORY, _OUT_DRIFT, _OUT_SIDEBYSIDE, _OUT_CSV, _OUT_JSON, _OUT_HISTORY, _OUT_SHARE_MD, _OUT_CANCEL_BTN = range(15)
+_NUM_OUTPUTS = 15
 
 
 def _empty_outputs(message: str, prompt_history: list[str]) -> tuple:
@@ -133,7 +136,7 @@ def _empty_outputs(message: str, prompt_history: list[str]) -> tuple:
     out = [""] * _NUM_OUTPUTS
     out[_OUT_LOG] = message
     out[_OUT_LEADERBOARD] = pd.DataFrame()
-    out[_OUT_BAR] = out[_OUT_SCATTER] = out[_OUT_CONSISTENCY] = out[_OUT_RADAR] = ef
+    out[_OUT_BAR] = out[_OUT_SCATTER] = out[_OUT_CONSISTENCY] = out[_OUT_RADAR] = out[_OUT_CATEGORY] = out[_OUT_DRIFT] = ef
     out[_OUT_HISTORY] = prompt_history
     out[_OUT_CANCEL_BTN] = gr.update(interactive=True, value="⛔ Cancel Benchmark")
     return tuple(out)
@@ -185,7 +188,7 @@ async def run_benchmark(
 
     def make_progress_yield() -> tuple:
         eta_str = f" · ETA: **{((time.perf_counter() - start_wall) / completed) * (total_tasks - completed):.0f}s**" if completed > 0 else ""
-        return ("\n".join(log_lines) + f"\n\n*Progress: {completed}/{total_tasks}{eta_str}*", "", pd.DataFrame(), ef, ef, ef, ef, "", "", "", prompt_history, "", gr.update(interactive=True, value="⛔ Cancel Benchmark"))
+        return ("\n".join(log_lines) + f"\n\n*Progress: {completed}/{total_tasks}{eta_str}*", "", pd.DataFrame(), ef, ef, ef, ef, ef, ef, "", "", "", prompt_history, "", gr.update(interactive=True, value="⛔ Cancel Benchmark"))
 
     async def execute_run(mid: str, prmpt: str, lbl: str, run_idx: int) -> BenchmarkResult:
         return await run_single_benchmark(api_key, mid, name_for(mid), prmpt, max_tok, temperature, top_p, cancel_flag, lbl)
@@ -243,19 +246,26 @@ async def run_benchmark(
     
     log_lines.append(f"\n### ✅ Complete{ ' (partial — cancelled)' if cancel_flag[0] else ''} — {round(time.perf_counter() - start_wall, 1)}s total — {len(all_results)} results")
 
+    insights_md = generate_insights(rows, all_results)
+    model_info_map = {m.id: m for m in cached_models} if cached_models else None
+    category_breakdown = build_category_breakdown(all_results)
+    category_fig = build_category_chart(category_breakdown) or empty_figure()
+    drift_fig = build_drift_chart(model_stats) or empty_figure()
     yield (
         "\n".join(log_lines),
-        generate_insights(rows),
-        build_leaderboard_dataframe(rows),
+        insights_md,
+        build_leaderboard_dataframe(rows, model_info_map),
         build_bar_chart(model_stats),
         build_scatter_chart(model_stats),
         build_consistency_chart(model_stats),
         build_radar_chart(rows),
+        category_fig,
+        drift_fig,
         build_sidebyside_markdown(model_stats),
         export_results_csv(all_results),
         export_results_json(all_results),
         prompt_history,
-        build_share_markdown(rows, generate_insights(rows)),
+        build_share_markdown(rows, insights_md),
         gr.update(interactive=True, value="⛔ Cancel Benchmark"),
     )
 
@@ -332,6 +342,8 @@ def build_app() -> gr.Blocks:
             with gr.Tab("📊 Charts"): bar_chart_output = gr.Plot(label="Metric Comparison"); scatter_chart_output = gr.Plot(label="TTFT vs Throughput")
             with gr.Tab("🎯 Radar"): radar_chart_output = gr.Plot(label="Normalized 5-Axis Comparison")
             with gr.Tab("📈 Consistency"): consistency_chart_output = gr.Plot(label="Variance (needs ≥2 runs/model)")
+            with gr.Tab("🗂️ By Category"): category_chart_output = gr.Plot(label="tok/s by Suite / Category (run a suite to populate)")
+            with gr.Tab("📉 Drift"): drift_chart_output = gr.Plot(label="Run-over-Run Throughput (needs ≥2 runs/model)")
             with gr.Tab("🔀 Side-by-Side"): sidebyside_output = gr.Markdown("*Run with 2+ models to compare outputs.*")
             with gr.Tab("📝 Live Log"): log_output = gr.Markdown("*Waiting for benchmark...*")
             with gr.Tab("💾 Export & Share"):
@@ -350,7 +362,7 @@ def build_app() -> gr.Blocks:
         run_btn.click(normalize_suite, inputs=[suite_dropdown], outputs=[suite_dropdown]).then(
             run_benchmark,
             inputs=[api_key_input, model_selector, prompt_input, max_tokens_slider, runs_slider, parallel_check, temperature_slider, top_p_slider, blind_mode_check, suite_dropdown, prompt_history_state, model_cache_state, cancel_state],
-            outputs=[log_output, insight_output, leaderboard_df_output, bar_chart_output, scatter_chart_output, consistency_chart_output, radar_chart_output, sidebyside_output, csv_state, json_state, prompt_history_state, share_md_state, cancel_btn]
+            outputs=[log_output, insight_output, leaderboard_df_output, bar_chart_output, scatter_chart_output, consistency_chart_output, radar_chart_output, category_chart_output, drift_chart_output, sidebyside_output, csv_state, json_state, prompt_history_state, share_md_state, cancel_btn]
         ).then(lambda history: gr.update(choices=history_to_choices(history), value=None), inputs=[prompt_history_state], outputs=[history_dropdown]
         ).then(lambda md: md, inputs=[share_md_state], outputs=[share_md_output]
         ).then(lambda: gr.update(interactive=True, value="⛔ Cancel Benchmark"), outputs=[cancel_btn])
