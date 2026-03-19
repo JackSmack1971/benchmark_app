@@ -24,7 +24,6 @@ from config import (
     BENCHMARK_PRESETS,
     BENCHMARK_SUITES,
     METRIC_GLOSSARY,
-    CSS,
     MAX_PARALLEL_WORKERS,
     ModelInfo,
     BenchmarkResult,
@@ -275,7 +274,7 @@ async def run_benchmark(
 def build_app() -> gr.Blocks:
     default_api_key = os.environ.get("OPENROUTER_API_KEY", "")
 
-    with gr.Blocks(title="OpenRouter Free Model Benchmarker v3", css=CSS) as app:
+    with gr.Blocks(title="OpenRouter Free Model Benchmarker v3") as app:
         prompt_history_state = gr.State([])
         csv_state = gr.State("")
         json_state = gr.State("")
