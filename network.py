@@ -159,7 +159,10 @@ async def run_single_benchmark(
                 raise _CancelledError("Cancelled by user")
                 
             try:
-                resp = await _client.send(req, stream=True, timeout=stream_timeout)
+                # httpx send() does not accept timeout; it uses the client's default or the timeout set via extensions
+                req.extensions = req.extensions or {}
+                req.extensions["timeout"] = stream_timeout.as_dict()
+                resp = await _client.send(req, stream=True)
                 resp.raise_for_status()
                 break  # Headers received successfully
                 

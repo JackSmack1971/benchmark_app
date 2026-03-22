@@ -26,11 +26,11 @@ from config import (
     PROMPT_PREVIEW_LEN,
     BenchmarkResult,
     LeaderboardRow,
+    ModelInfo,
 )
 
 # ── Pandas Engine Configuration ─────────────────────────────────────────────
 pd.options.mode.copy_on_write = True
-pd.options.mode.dtype_backend = "pyarrow"
 
 # ── Type Aliases ────────────────────────────────────────────────────────────
 _ModelAccumulator = dict[str, dict]
@@ -158,15 +158,70 @@ def build_leaderboard_rows(model_stats: _ModelAccumulator) -> list[LeaderboardRo
         )
 
     rows.sort(key=lambda r: r.avg_tps, reverse=True)
+
+    composite_scores = compute_radar_scores(rows)
+    for row in rows:
+        row.composite_score = composite_scores.get(row.model_id, 0.0)
+
     return rows
+
+
+# ── Composite Radar Score ───────────────────────────────────────────────────
+
+def compute_radar_scores(rows: list[LeaderboardRow]) -> dict[str, float]:
+    """
+    Normalize the 5 radar dimensions and produce a weighted composite score.
+
+    Weights: Speed 30% | Responsiveness 20% | Consistency 20% | Output 15% | Reliability 15%
+
+    Returns:
+        {model_id: composite_score_0_to_100}
+    """
+    if not rows:
+        return {}
+
+    raw: dict[str, dict[str, float]] = {}
+    for row in rows:
+        avg_tps = row.avg_tps if row.avg_tps > 0 else 0.01
+        avg_ttft = row.avg_ttft if row.avg_ttft is not None and row.avg_ttft > 0 else 10.0
+        cv = row.cv_tps if row.cv_tps > 0 else 100.0
+        raw[row.model_id] = {
+            "speed": avg_tps,
+            "responsiveness": 1.0 / avg_ttft,
+            "consistency": 1.0 / max(cv, 0.1),
+            "output": float(row.avg_tokens),
+            "reliability": max(0.0, 100.0 - row.error_rate),
+        }
+
+    axes = ["speed", "responsiveness", "consistency", "output", "reliability"]
+    maxima = {axis: max(raw[m][axis] for m in raw) or 1.0 for axis in axes}
+    weights = {"speed": 0.30, "responsiveness": 0.20, "consistency": 0.20, "output": 0.15, "reliability": 0.15}
+
+    scores: dict[str, float] = {}
+    for row in rows:
+        vals = raw[row.model_id]
+        score = sum(
+            (vals[axis] / maxima[axis]) * 100.0 * weights[axis]
+            for axis in axes
+        )
+        scores[row.model_id] = round(score, 1)
+
+    return scores
 
 
 # ── UI DataFrame Construction (Aggressively Downcasted) ─────────────────────
 
-def build_leaderboard_dataframe(rows: list[LeaderboardRow]) -> pd.DataFrame:
+def build_leaderboard_dataframe(
+    rows: list[LeaderboardRow],
+    model_info_map: Optional[dict[str, ModelInfo]] = None,
+) -> pd.DataFrame:
     """
     Construct a presentation-ready DataFrame enforcing strict 32-bit types.
     This safely feeds Gradio without risking event loop stalls during rendering.
+
+    Args:
+        rows: Sorted leaderboard rows.
+        model_info_map: Optional {model_id: ModelInfo} for context window column.
     """
     if not rows:
         return pd.DataFrame(
@@ -179,7 +234,7 @@ def build_leaderboard_dataframe(rows: list[LeaderboardRow]) -> pd.DataFrame:
     records: list[dict] = []
     for rank, row in enumerate(rows, 1):
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, str(rank))
-        records.append({
+        record: dict = {
             "#": medal,
             "Model": row.model,
             "Latency (s)": row.avg_lat,
@@ -192,7 +247,16 @@ def build_leaderboard_dataframe(rows: list[LeaderboardRow]) -> pd.DataFrame:
             "Cost/1K tokens ($)": row.avg_cost_per_1k,
             "Errors": row.errors,
             "Runs": row.runs,
-        })
+        }
+        if model_info_map:
+            info = model_info_map.get(row.model_id)
+            if info and info.context_length > 0:
+                pct = round(row.avg_tokens / info.context_length * 100, 1)
+                ctx_k = f"{info.context_length // 1000}K" if info.context_length >= 1000 else str(info.context_length)
+                record["Ctx Used"] = f"{pct}% of {ctx_k}"
+            else:
+                record["Ctx Used"] = "—"
+        records.append(record)
 
     df = pd.DataFrame(records)
 
@@ -210,6 +274,7 @@ def build_leaderboard_dataframe(rows: list[LeaderboardRow]) -> pd.DataFrame:
         "Cost/1K tokens ($)": "float64[pyarrow]",  # 64-bit for sub-cent precision
         "Errors": "int32[pyarrow]",
         "Runs": "int32[pyarrow]",
+        "Ctx Used": "string[pyarrow]",
     }
 
     for col, dtype in arrow_dtypes.items():
@@ -217,6 +282,46 @@ def build_leaderboard_dataframe(rows: list[LeaderboardRow]) -> pd.DataFrame:
             df[col] = df[col].astype(dtype)
 
     return df
+
+
+# ── Per-Category Breakdown ──────────────────────────────────────────────────
+
+def build_category_breakdown(all_results: list[BenchmarkResult]) -> pd.DataFrame:
+    """
+    Group benchmark results by (model_name, suite_label) and compute mean tok/s
+    and mean latency per cell. Only includes results with a non-empty suite_label.
+
+    Returns:
+        DataFrame with columns: model_name, suite_label, avg_tps, avg_lat.
+        Empty DataFrame if no suite data is present.
+    """
+    df = _ingest_and_downcast(all_results)
+    if df.empty:
+        return pd.DataFrame()
+
+    # Filter to rows that were part of a named suite/preset
+    if "suite_label" not in df.columns:
+        return pd.DataFrame()
+
+    suite_df = df[df["suite_label"].astype(str).str.strip() != ""]
+    if suite_df.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        suite_df.groupby(["model_name", "suite_label"], observed=True)
+        .agg(
+            avg_tps=("tokens_per_sec", "mean"),
+            avg_lat=("latency_sec", "mean"),
+        )
+        .reset_index()
+    )
+
+    grouped["avg_tps"] = grouped["avg_tps"].round(1)
+    grouped["avg_lat"] = grouped["avg_lat"].round(2)
+    grouped["model_name"] = grouped["model_name"].astype(str)
+    grouped["suite_label"] = grouped["suite_label"].astype(str)
+
+    return grouped
 
 
 # ── Side-by-Side Response Markdown ──────────────────────────────────────────

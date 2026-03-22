@@ -271,6 +271,7 @@ class LeaderboardRow:
     runs: int
     error_rate: float
     avg_cost_per_1k: float = 0.0
+    composite_score: float = 0.0
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -17,6 +17,7 @@ from __future__ import annotations
 import statistics as stats
 from typing import Optional
 
+import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -237,6 +238,108 @@ def build_consistency_chart(model_stats: _ModelAccumulator) -> go.Figure:
 
 
 # ── Radar Chart: 5-Axis Normalized Performance ─────────────────────────────
+
+# ── Category Breakdown Chart ────────────────────────────────────────────────
+
+def build_category_chart(breakdown_df: pd.DataFrame) -> Optional[go.Figure]:
+    """
+    Grouped bar chart showing avg tok/s per model per suite/preset category.
+
+    Args:
+        breakdown_df: Output of processing.build_category_breakdown().
+
+    Returns:
+        Plotly Figure, or None if no suite data is present.
+    """
+    if breakdown_df is None or breakdown_df.empty:
+        return None
+
+    labels = sorted(breakdown_df["suite_label"].unique())
+    models = breakdown_df["model_name"].unique().tolist()
+
+    traces = []
+    for i, label in enumerate(labels):
+        subset = breakdown_df[breakdown_df["suite_label"] == label]
+        x_vals = subset["model_name"].tolist()
+        y_vals = subset["avg_tps"].tolist()
+        traces.append(
+            go.Bar(
+                x=x_vals,
+                y=y_vals,
+                name=label[:40],
+                marker_color=color_for_index(i),
+                hovertemplate="<b>%{x}</b><br>Category: " + label[:40] + "<br>tok/s: %{y:.1f}<extra></extra>",
+            )
+        )
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        **_base_layout_kwargs(height=400, bottom_margin=100),
+        title="Performance by Suite / Category",
+        xaxis_title="Model",
+        yaxis_title="Avg tok/s ↑",
+        barmode="group",
+        legend=dict(orientation="h", y=-0.35, x=0.5, xanchor="center"),
+    )
+    fig.update_xaxes(tickangle=45, gridcolor=_GRID_COLOR)
+    fig.update_yaxes(gridcolor=_GRID_COLOR)
+
+    return fig
+
+
+# ── Drift Chart: Run-over-Run Performance ───────────────────────────────────
+
+def build_drift_chart(model_stats: _ModelAccumulator) -> Optional[go.Figure]:
+    """
+    Line chart of tok/s per run index, one line per model.
+    Reveals rate-limit throttling or server-side degradation across repeated calls.
+
+    Returns:
+        Plotly Figure, or None if all models have fewer than 2 runs.
+    """
+    traces = []
+
+    for i, (mid, bucket) in enumerate(model_stats.items()):
+        tps_vals = bucket.get("tps_vals", [])
+        if len(tps_vals) < 2:
+            continue
+
+        c = color_for_index(i)
+        run_indices = list(range(1, len(tps_vals) + 1))
+
+        traces.append(
+            go.Scatter(
+                x=run_indices,
+                y=[round(v, 1) for v in tps_vals],
+                mode="lines+markers",
+                name=bucket["name"][:30],
+                line=dict(color=c, width=2),
+                marker=dict(size=6, color=c),
+                hovertemplate=(
+                    f"<b>{bucket['name'][:30]}</b><br>"
+                    f"Run: %{{x}}<br>"
+                    f"tok/s: %{{y:.1f}}<br>"
+                    f"<extra></extra>"
+                ),
+            )
+        )
+
+    if not traces:
+        return None
+
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        **_base_layout_kwargs(height=380, bottom_margin=60),
+        title="Run-over-Run Throughput Drift",
+        xaxis_title="Run #",
+        yaxis_title="tok/s",
+        xaxis=dict(tickmode="linear", dtick=1, gridcolor=_GRID_COLOR),
+        yaxis=dict(gridcolor=_GRID_COLOR),
+        legend=dict(orientation="h", y=-0.2, x=0.5, xanchor="center"),
+    )
+
+    return fig
+
 
 _RADAR_AXES: list[str] = ["Speed", "Responsiveness", "Consistency", "Output Volume", "Reliability"]
 

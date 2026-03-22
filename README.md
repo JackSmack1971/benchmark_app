@@ -2,6 +2,47 @@
 
 Head-to-head benchmarking of free LLM models via [OpenRouter](https://openrouter.ai), built with Gradio.
 
+## Architecture
+
+```
+benchmark_app/
+├── __init__.py          # Package metadata
+├── config.py            # Constants, presets, suites, dataclasses
+├── network.py           # httpx.AsyncClient + async fetching & streaming
+├── processing.py        # PyArrow-backed Pandas aggregation, statistics
+├── visualization.py     # Plotly chart builders (bar, scatter, consistency, radar)
+├── export.py            # CSV, JSON, share-ready Markdown
+├── insights.py          # Natural-language insight generation
+├── ui_components.py     # Pure Gradio UI declarations and blocks
+├── state_managers.py    # Async orchestrator and business logic binding
+├── app.py               # Thin entry point wrapper
+├── run.py               # Entry point
+├── requirements.txt     # Pinned dependencies
+├── tests/               # Comprehensive pytest suite (async + pyarrow coverage)
+├── .env.example         # Environment variable template
+└── .gitignore           # Git ignore rules
+```
+
+**Data flow (unidirectional):**
+
+```
+network.py → processing.py (PyArrow) → visualization.py (Plotly) → state_managers.py → ui_components.py
+```
+
+**Module isolation:**
+
+| Module               | gradio | httpx/asyncio | pandas | plotly | config |
+|----------------------|:------:|:-------------:|:------:|:------:|:------:|
+| `config.py`          |   ✗    |       ✗       |   ✗    |   ✗    |   —    |
+| `network.py`         |   ✗    |       ✅      |   ✗    |   ✗    |   ✅   |
+| `processing.py`      |   ✗    |       ✗       |   ✅   |   ✗    |   ✅   |
+| `visualization.py`   |   ✗    |       ✗       |   ✗    |   ✅   |   ✅   |
+| `export.py`          |   ✗    |       ✗       |   ✗    |   ✗    |   ✅   |
+| `insights.py`        |   ✗    |       ✗       |   ✗    |   ✗    |   ✅   |
+| `state_managers.py`  |   ✅   |       ✅      |   ✅   |   ✗    |   ✅   |
+| `ui_components.py`   |   ✅   |       ✗       |   ✗    |   ✗    |   ✅   |
+| `app.py` / `run.py`  |   ✅   |       ✗       |   ✗    |   ✗    |   ✗    |
+
 ## Quick Start
 
 ```bash
@@ -92,6 +133,9 @@ The API key can also be entered directly in the UI's **🔑 API Key** accordion 
 | **σ (Std Dev)** | Standard deviation across runs |
 | **CV%** | Coefficient of Variation (σ / mean × 100) — normalized consistency |
 | **Radar axes** | Speed (1/latency), Responsiveness (1/TTFT), Consistency (1/CV%), Output Volume, Reliability (1 − error rate) — all normalized 0–100 |
+**Persistent `httpx.AsyncClient`** for high-performance async socket multiplexing, coupled with native asyncio exponential backoff for transient errors (429, 5xx).
+
+**Async concurrency model** via `asyncio.gather/as_completed` — eliminates thread blocking during concurrent streaming benchmark execution, avoiding race conditions.
 
 ## Architecture
 
@@ -126,6 +170,7 @@ network.py → processing.py (PyArrow) → visualization.py (Plotly) → app.py 
 | `insights.py` | ✗ | ✗ | ✗ | ✗ | ✅ |
 | `app.py` | ✅ | ✗ | ✅ | ✗ | ✅ |
 | `run.py` | ✅ | ✗ | ✗ | ✗ | ✗ |
+**Separation of Concerns** — The legacy `app.py` God Class was decoupled. `ui_components.py` is purely functional layout, while `state_managers.py` orchestrates state mutations. Neither contains explicit HTTP streaming or statistics computations. Every domain concern is delegated to its respective module.
 
 ## License
 

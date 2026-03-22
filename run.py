@@ -33,6 +33,7 @@ except ImportError:
 import gradio as gr
 
 from app import build_app
+from config import CSS
 
 
 def main() -> None:
@@ -81,6 +82,7 @@ def main() -> None:
         server_port=server_port,
         share=share,
         theme=theme,
+        css=CSS,
     )
 
 
