@@ -16,11 +16,13 @@ from config import (
     DEFAULT_TOP_P
 )
 
-from processing import (
+from aggregation import (
     _ingest_and_downcast,
     aggregate_stats,
     build_leaderboard_rows,
-    compute_radar_scores,
+    compute_radar_scores
+)
+from processing import (
     build_leaderboard_dataframe,
     build_category_breakdown,
     build_sidebyside_markdown,
@@ -63,8 +65,7 @@ def test_build_leaderboard_rows_empty():
 
 def test_build_leaderboard_rows_valid(sample_result, error_result):
     # Single model stats
-    model_stats = aggregate_stats([sample_result, sample_result, error_result])
-    rows = build_leaderboard_rows(model_stats)
+    rows = build_leaderboard_rows([sample_result, sample_result, error_result])
     assert len(rows) == 1
     row = rows[0]
     assert row.runs == 3
@@ -104,7 +105,7 @@ def test_compute_radar_scores_zeros():
 def test_build_leaderboard_dataframe_empty():
     df = build_leaderboard_dataframe([])
     assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == ["#", "Model", "Latency (s)", "σ Lat", "TTFT (s)", "tok/s", "σ tok/s", "CV%", "Tokens", "Errors", "Runs"]
+    assert list(df.columns) == ["#", "Model", "Latency (s)", "σ Lat", "TTFT (s)", "tok/s", "σ tok/s", "CV%", "Tokens", "Cost/1K tokens ($)", "Errors", "Runs"]
 
 def test_build_leaderboard_dataframe_valid(sample_leaderboard_row, sample_model_info):
     # Test mapped context length

@@ -1,0 +1,18 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.12, pytest-8.3.4, pluggy-1.6.0 -- C:\Users\click\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: C:\Users\click\OneDrive\Desktop\benchmark_app
+plugins: anyio-4.11.0, Faker-40.1.0, hypothesis-6.148.4, langsmith-0.3.45, logfire-4.16.0, asyncio-0.25.2, base-url-2.1.0, cov-6.0.0, mock-3.15.1, playwright-0.7.2, respx-0.22.0
+asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
+collecting ... collected 0 items / 1 error
+
+=================================== ERRORS ====================================
+_______________ ERROR collecting tests/e2e/test_ui_contract.py ________________
+tests\e2e\test_ui_contract.py:61: in <module>
+    def test_app_yield_contract(page: Page, run_app: str):
+E   NameError: name 'Page' is not defined
+=========================== short test summary info ===========================
+ERROR tests/e2e/test_ui_contract.py - NameError: name 'Page' is not defined
+!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+============================== 1 error in 0.74s ===============================

@@ -1,0 +1,44 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.12, pytest-8.3.4, pluggy-1.6.0 -- C:\Users\click\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\python.exe
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: C:\Users\click\OneDrive\Desktop\benchmark_app
+plugins: anyio-4.11.0, Faker-40.1.0, hypothesis-6.148.4, langsmith-0.3.45, logfire-4.16.0, asyncio-0.25.2, base-url-2.1.0, cov-6.0.0, mock-3.15.1, playwright-0.7.2, respx-0.22.0
+asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
+collecting ... collected 23 items / 22 deselected / 1 selected
+run-last-failure: rerun previous 1 failure
+
+tests/test_processing.py::test_build_leaderboard_dataframe_empty FAILED  [100%]
+
+================================== FAILURES ===================================
+___________________ test_build_leaderboard_dataframe_empty ____________________
+
+    def test_build_leaderboard_dataframe_empty():
+        df = build_leaderboard_dataframe([])
+        assert isinstance(df, pd.DataFrame)
+>       assert list(df.columns) == ["#", "Model", "Latency (s)", "\u03c3 Lat", "TTFT (s)", "tok/s", "\u03c3 tok/s", "CV%", "Tokens", "Errors", "Runs"]
+E       AssertionError: assert ['#', 'Model'... 'tok/s', ...] == ['#', 'Model'... 'tok/s', ...]
+E         
+E         At index 9 diff: 'Cost/1K tokens ($)' != 'Errors'
+E         Left contains one more item: 'Runs'
+E         
+E         Full diff:
+E           [
+E               '#',...
+E         
+E         ...Full output truncated (12 lines hidden), use '-vv' to show
+
+tests\test_processing.py:108: AssertionError
+============================== warnings summary ===============================
+aggregation.py:15
+  C:\Users\click\OneDrive\Desktop\benchmark_app\aggregation.py:15: Pandas4Warning: The 'mode.copy_on_write' option is deprecated. Copy-on-Write can no longer be disabled (it is always enabled with pandas >= 3.0), and setting the option has no impact. This option will be removed in pandas 4.0.
+    pd.options.mode.copy_on_write = True
+
+processing.py:32
+  C:\Users\click\OneDrive\Desktop\benchmark_app\processing.py:32: Pandas4Warning: The 'mode.copy_on_write' option is deprecated. Copy-on-Write can no longer be disabled (it is always enabled with pandas >= 3.0), and setting the option has no impact. This option will be removed in pandas 4.0.
+    pd.options.mode.copy_on_write = True
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_processing.py::test_build_leaderboard_dataframe_empty - Ass...
+================ 1 failed, 22 deselected, 2 warnings in 1.44s =================

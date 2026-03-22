@@ -11,7 +11,6 @@ Architectural Enhancements:
 
 from __future__ import annotations
 
-import statistics as stats
 from typing import Optional
 
 import pandas as pd
@@ -32,181 +31,13 @@ from config import (
 # ── Pandas Engine Configuration ─────────────────────────────────────────────
 pd.options.mode.copy_on_write = True
 
-# ── Type Aliases ────────────────────────────────────────────────────────────
-_ModelAccumulator = dict[str, dict]
+# We need _ingest_and_downcast and compute_radar_scores for internal references
+# but mostly we'll import what we need or provide inline implementations.
+# Actually, we need to import _ingest_and_downcast from aggregation to process lists for other functions like category breakdown.
+from aggregation import _ingest_and_downcast, _ModelAccumulator
 
 
-# ── Core Data Ingestion & Downcasting ───────────────────────────────────────
 
-def _ingest_and_downcast(all_results: list[BenchmarkResult]) -> pd.DataFrame:
-    """
-    Ingests raw telemetry into a zero-copy Arrow memory layout and aggressively
-    downcasts 64-bit defaults to 32-bit hardware boundaries.
-    """
-    if not all_results:
-        return pd.DataFrame()
-
-    df = pd.DataFrame([r.to_dict() for r in all_results])
-
-    # ── Strict Hardware-Optimized Schema ──
-    # Shrinks footprint by 50% and aligns data perfectly with CPU cache lines.
-    schema = {
-        'model_id': 'category',
-        'model_name': 'category',
-        'latency_sec': 'float32[pyarrow]',
-        'ttft_sec': 'float32[pyarrow]',
-        'tokens_per_sec': 'float32[pyarrow]',
-        'prompt_tokens': 'int32[pyarrow]',
-        'completion_tokens': 'int32[pyarrow]',
-        'total_tokens': 'int32[pyarrow]',
-        'prompt_cost_usd': 'float64[pyarrow]',
-        'completion_cost_usd': 'float64[pyarrow]',
-        'error': 'string[pyarrow]',
-        'response': 'string[pyarrow]'
-    }
-
-    return df.astype({k: v for k, v in schema.items() if k in df.columns})
-
-
-# ── Statistical Aggregation ─────────────────────────────────────────────────
-
-def aggregate_stats(all_results: list[BenchmarkResult]) -> _ModelAccumulator:
-    """
-    Accumulate raw benchmark results utilizing the downcasted PyArrow engine.
-    Maintains dict output contract specifically for Plotly box/scatter charts.
-    """
-    df = _ingest_and_downcast(all_results)
-    model_stats: _ModelAccumulator = {}
-
-    if df.empty:
-        return model_stats
-
-    # Grouping via categorical index is natively accelerated in PyArrow
-    for mid, group in df.groupby('model_id', observed=True):
-        if group.empty:
-            continue
-            
-        total_costs = (
-            group['prompt_cost_usd'].fillna(0) + group['completion_cost_usd'].fillna(0)
-        ).tolist()
-        model_stats[str(mid)] = {
-            "name": str(group['model_name'].iloc[0]),
-            "latencies": group['latency_sec'].dropna().tolist(),
-            "ttfts": group['ttft_sec'].dropna().tolist(),
-            "tps_vals": group['tokens_per_sec'].dropna().tolist(),
-            "comp_tokens": group['completion_tokens'].dropna().tolist(),
-            "total_costs": total_costs,
-            "errors": int(group['error'].notna().sum()),
-            "responses": group['response'].dropna().tolist(),
-            "total_runs": len(group)
-        }
-
-    return model_stats
-
-
-def build_leaderboard_rows(model_stats: _ModelAccumulator) -> list[LeaderboardRow]:
-    """
-    Transform accumulated stats into sorted LeaderboardRow objects.
-    Calculates unified metrics (Mean, Stdev, CV%).
-    """
-    rows: list[LeaderboardRow] = []
-
-    for mid, bucket in model_stats.items():
-        tps_vals = bucket["tps_vals"]
-        latencies = bucket["latencies"]
-        ttfts = bucket["ttfts"]
-        comp_tokens = bucket["comp_tokens"]
-        total_costs = bucket.get("total_costs", [])
-        total_runs = bucket["total_runs"]
-        errors = bucket["errors"]
-
-        avg_tps = stats.mean(tps_vals) if tps_vals else 0.0
-        std_tps = stats.stdev(tps_vals) if len(tps_vals) >= 2 else 0.0
-        cv_tps = (std_tps / avg_tps * 100.0) if avg_tps > 0 else 0.0
-
-        avg_lat = stats.mean(latencies) if latencies else 999.0
-        std_lat = stats.stdev(latencies) if len(latencies) >= 2 else 0.0
-
-        avg_ttft: Optional[float] = (
-            round(stats.mean(ttfts), 3) if ttfts else None
-        )
-
-        avg_tokens = round(stats.mean(comp_tokens)) if comp_tokens else 0
-        error_rate = round(errors / total_runs * 100, 1) if total_runs else 0.0
-
-        avg_total_cost = stats.mean(total_costs) if total_costs else 0.0
-        avg_cost_per_1k = (
-            round(avg_total_cost / avg_tokens * 1000, 6) if avg_tokens > 0 else 0.0
-        )
-
-        rows.append(
-            LeaderboardRow(
-                model=bucket["name"],
-                model_id=mid,
-                avg_lat=round(avg_lat, 2),
-                std_lat=round(std_lat, 2),
-                avg_ttft=avg_ttft,
-                avg_tps=round(avg_tps, 1),
-                std_tps=round(std_tps, 1),
-                cv_tps=round(cv_tps, 1),
-                avg_tokens=avg_tokens,
-                errors=errors,
-                runs=total_runs,
-                error_rate=error_rate,
-                avg_cost_per_1k=avg_cost_per_1k,
-            )
-        )
-
-    rows.sort(key=lambda r: r.avg_tps, reverse=True)
-
-    composite_scores = compute_radar_scores(rows)
-    for row in rows:
-        row.composite_score = composite_scores.get(row.model_id, 0.0)
-
-    return rows
-
-
-# ── Composite Radar Score ───────────────────────────────────────────────────
-
-def compute_radar_scores(rows: list[LeaderboardRow]) -> dict[str, float]:
-    """
-    Normalize the 5 radar dimensions and produce a weighted composite score.
-
-    Weights: Speed 30% | Responsiveness 20% | Consistency 20% | Output 15% | Reliability 15%
-
-    Returns:
-        {model_id: composite_score_0_to_100}
-    """
-    if not rows:
-        return {}
-
-    raw: dict[str, dict[str, float]] = {}
-    for row in rows:
-        avg_tps = row.avg_tps if row.avg_tps > 0 else 0.01
-        avg_ttft = row.avg_ttft if row.avg_ttft is not None and row.avg_ttft > 0 else 10.0
-        cv = row.cv_tps if row.cv_tps > 0 else 100.0
-        raw[row.model_id] = {
-            "speed": avg_tps,
-            "responsiveness": 1.0 / avg_ttft,
-            "consistency": 1.0 / max(cv, 0.1),
-            "output": float(row.avg_tokens),
-            "reliability": max(0.0, 100.0 - row.error_rate),
-        }
-
-    axes = ["speed", "responsiveness", "consistency", "output", "reliability"]
-    maxima = {axis: max(raw[m][axis] for m in raw) or 1.0 for axis in axes}
-    weights = {"speed": 0.30, "responsiveness": 0.20, "consistency": 0.20, "output": 0.15, "reliability": 0.15}
-
-    scores: dict[str, float] = {}
-    for row in rows:
-        vals = raw[row.model_id]
-        score = sum(
-            (vals[axis] / maxima[axis]) * 100.0 * weights[axis]
-            for axis in axes
-        )
-        scores[row.model_id] = round(score, 1)
-
-    return scores
 
 
 # ── UI DataFrame Construction (Aggressively Downcasted) ─────────────────────

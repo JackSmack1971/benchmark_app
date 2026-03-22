@@ -23,8 +23,6 @@ from network import (
     run_single_benchmark,
 )
 from processing import (
-    aggregate_stats,
-    build_leaderboard_rows,
     build_leaderboard_dataframe,
     build_category_breakdown,
     build_sidebyside_markdown,
@@ -37,6 +35,7 @@ from processing import (
     apply_blind_labels,
     reveal_blind_results,
 )
+from aggregation import aggregate_stats, build_leaderboard_rows
 from visualization import (
     empty_figure,
     build_bar_chart,
@@ -223,7 +222,7 @@ async def run_benchmark(
     if blind_mode: reveal_blind_results(all_results, model_lookup)
 
     model_stats = aggregate_stats(all_results)
-    rows = build_leaderboard_rows(model_stats)
+    rows = build_leaderboard_rows(all_results)
     
     log_lines.append(f"\n### ✅ Complete{ ' (partial — cancelled)' if cancel_flag[0] else ''} — {round(time.perf_counter() - start_wall, 1)}s total — {len(all_results)} results")
 
