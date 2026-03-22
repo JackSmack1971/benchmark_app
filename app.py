@@ -170,6 +170,13 @@ async def run_benchmark(
     def name_for(mid: str) -> str:
         return apply_blind_labels(selected_models, mid) if blind_mode else model_lookup.get(mid, mid)
 
+    _price_cache: dict[str, tuple[float, float]] = {
+        m.id: (m.prompt_price, m.completion_price) for m in cached_models
+    }
+
+    def price_for(mid: str) -> tuple[float, float]:
+        return _price_cache.get(mid, (0.0, 0.0))
+
     runs, max_tok = int(runs_per_model), int(max_tokens)
     task_args = [(mid, prompt, label, run_idx) for prompt, label in prompts_to_run for mid in selected_models for run_idx in range(runs)]
     total_tasks = len(task_args)
@@ -188,7 +195,8 @@ async def run_benchmark(
         return ("\n".join(log_lines) + f"\n\n*Progress: {completed}/{total_tasks}{eta_str}*", "", pd.DataFrame(), ef, ef, ef, ef, "", "", "", prompt_history, "", gr.update(interactive=True, value="⛔ Cancel Benchmark"))
 
     async def execute_run(mid: str, prmpt: str, lbl: str, run_idx: int) -> BenchmarkResult:
-        return await run_single_benchmark(api_key, mid, name_for(mid), prmpt, max_tok, temperature, top_p, cancel_flag, lbl)
+        pp, cp = price_for(mid)
+        return await run_single_benchmark(api_key, mid, name_for(mid), prmpt, max_tok, temperature, top_p, cancel_flag, lbl, pp, cp)
 
     def log_result(res: BenchmarkResult, lbl: str, r_idx: int):
         status = "❌" if res.is_error else "✅"
