@@ -8,14 +8,17 @@ Head-to-head benchmarking of free LLM models via [OpenRouter](https://openrouter
 benchmark_app/
 ├── __init__.py          # Package metadata
 ├── config.py            # Constants, presets, suites, dataclasses
-├── network.py           # requests.Session + retry, model fetch, streaming
+├── network.py           # httpx.AsyncClient + async fetching & streaming
 ├── processing.py        # PyArrow-backed Pandas aggregation, statistics
 ├── visualization.py     # Plotly chart builders (bar, scatter, consistency, radar)
 ├── export.py            # CSV, JSON, share-ready Markdown
 ├── insights.py          # Natural-language insight generation
-├── app.py               # Thin Gradio UI — routing & presentation only
+├── ui_components.py     # Pure Gradio UI declarations and blocks
+├── state_managers.py    # Async orchestrator and business logic binding
+├── app.py               # Thin entry point wrapper
 ├── run.py               # Entry point
 ├── requirements.txt     # Pinned dependencies
+├── tests/               # Comprehensive pytest suite (async + pyarrow coverage)
 ├── .env.example         # Environment variable template
 └── .gitignore           # Git ignore rules
 ```
@@ -23,21 +26,22 @@ benchmark_app/
 **Data flow (unidirectional):**
 
 ```
-network.py → processing.py (PyArrow) → visualization.py (Plotly) → app.py (Gradio)
+network.py → processing.py (PyArrow) → visualization.py (Plotly) → state_managers.py → ui_components.py
 ```
 
 **Module isolation:**
 
-| Module             | gradio | requests | pandas | plotly | config |
-|--------------------|:------:|:--------:|:------:|:------:|:------:|
-| `config.py`        |   ✗    |    ✗     |   ✗    |   ✗    |   —    |
-| `network.py`       |   ✗    |    ✅    |   ✗    |   ✗    |   ✅   |
-| `processing.py`    |   ✗    |    ✗     |   ✅   |   ✗    |   ✅   |
-| `visualization.py` |   ✗    |    ✗     |   ✗    |   ✅   |   ✅   |
-| `export.py`        |   ✗    |    ✗     |   ✗    |   ✗    |   ✅   |
-| `insights.py`      |   ✗    |    ✗     |   ✗    |   ✗    |   ✅   |
-| `app.py`           |   ✅   |    ✗     |   ✅   |   ✗    |   ✅   |
-| `run.py`           |   ✅   |    ✗     |   ✗    |   ✗    |   ✗    |
+| Module               | gradio | httpx/asyncio | pandas | plotly | config |
+|----------------------|:------:|:-------------:|:------:|:------:|:------:|
+| `config.py`          |   ✗    |       ✗       |   ✗    |   ✗    |   —    |
+| `network.py`         |   ✗    |       ✅      |   ✗    |   ✗    |   ✅   |
+| `processing.py`      |   ✗    |       ✗       |   ✅   |   ✗    |   ✅   |
+| `visualization.py`   |   ✗    |       ✗       |   ✗    |   ✅   |   ✅   |
+| `export.py`          |   ✗    |       ✗       |   ✗    |   ✗    |   ✅   |
+| `insights.py`        |   ✗    |       ✗       |   ✗    |   ✗    |   ✅   |
+| `state_managers.py`  |   ✅   |       ✅      |   ✅   |   ✗    |   ✅   |
+| `ui_components.py`   |   ✅   |       ✗       |   ✗    |   ✗    |   ✅   |
+| `app.py` / `run.py`  |   ✅   |       ✗       |   ✗    |   ✗    |   ✗    |
 
 ## Quick Start
 
@@ -95,15 +99,15 @@ Open `http://localhost:7860` in your browser.
 
 ## Key Design Decisions
 
-**Persistent `requests.Session`** with `HTTPAdapter` + `urllib3.util.Retry` for connection pooling and exponential backoff on transient errors (429, 5xx).
+**Persistent `httpx.AsyncClient`** for high-performance async socket multiplexing, coupled with native asyncio exponential backoff for transient errors (429, 5xx).
 
-**Thread-safe API key mutation** via `threading.Lock` — eliminates race conditions during concurrent benchmark execution.
+**Async concurrency model** via `asyncio.gather/as_completed` — eliminates thread blocking during concurrent streaming benchmark execution, avoiding race conditions.
 
 **PyArrow dtype backend** on all Pandas DataFrames for columnar memory layout, native nullable types (no NaN sentinel), and reduced memory footprint.
 
 **Typed dataclasses** (`BenchmarkResult`, `ModelInfo`, `LeaderboardRow`) replace anonymous dicts throughout the pipeline — static analysis catches typos at write time, not runtime.
 
-**Gradio as thin shell** — `app.py` contains zero HTTP calls, zero statistics computations, zero chart construction, and zero serialization logic. Every domain concern is delegated to its respective module.
+**Separation of Concerns** — The legacy `app.py` God Class was decoupled. `ui_components.py` is purely functional layout, while `state_managers.py` orchestrates state mutations. Neither contains explicit HTTP streaming or statistics computations. Every domain concern is delegated to its respective module.
 
 ## License
 
