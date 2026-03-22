@@ -126,6 +126,8 @@ async def run_single_benchmark(
     top_p: float,
     cancel_flag: list[bool],
     suite_label: str = "",
+    prompt_price: float = 0.0,
+    completion_price: float = 0.0,
 ) -> BenchmarkResult:
     """
     Execute a single streaming benchmark asynchronously.
@@ -238,6 +240,8 @@ async def run_single_benchmark(
             top_p=top_p,
             max_tokens_cfg=max_tokens,
             suite_label=suite_label,
+            prompt_cost_usd=round(prompt_tokens * prompt_price, 8),
+            completion_cost_usd=round(completion_tokens * completion_price, 8),
         )
 
     except _CancelledError:

@@ -154,6 +154,7 @@ METRIC_GLOSSARY: str = """
 | **σ (Std Dev)** | Standard deviation across runs — lower = more consistent |
 | **CV%** | Coefficient of Variation (σ/mean × 100) — normalized consistency |
 | **Radar axes** | Speed (1/latency), Responsiveness (1/TTFT), Consistency (1/CV%), Output Volume, Reliability (1 − error rate) — all normalized 0–100 |
+| **Cost/1K tokens** | Estimated USD cost per 1 000 completion tokens based on OpenRouter list pricing (prompt + completion costs combined) |
 """
 
 
@@ -193,6 +194,8 @@ class BenchmarkResult:
     error: Optional[str] = None
     timestamp: str = ""
     suite_label: str = ""
+    prompt_cost_usd: float = 0.0
+    completion_cost_usd: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.timestamp:
@@ -218,12 +221,21 @@ class ModelInfo:
     modality: str
     max_completion: int
     description: str
+    prompt_price: float = 0.0
+    completion_price: float = 0.0
 
     @classmethod
     def from_api_dict(cls, m: dict) -> "ModelInfo":
         """Factory: construct from a raw OpenRouter model dict."""
         model_id = m.get("id", "unknown")
         provider = model_id.split("/")[0] if "/" in model_id else "unknown"
+        pricing = m.get("pricing", {})
+        try:
+            prompt_price = float(pricing.get("prompt", 0) or 0)
+            completion_price = float(pricing.get("completion", 0) or 0)
+        except (ValueError, TypeError):
+            prompt_price = 0.0
+            completion_price = 0.0
         return cls(
             id=model_id,
             name=m.get("name", model_id),
@@ -234,6 +246,8 @@ class ModelInfo:
                 "max_completion_tokens", 0
             ),
             description=(m.get("description") or "")[:200],
+            prompt_price=prompt_price,
+            completion_price=completion_price,
         )
 
     def to_dict(self) -> dict:
@@ -256,6 +270,7 @@ class LeaderboardRow:
     errors: int
     runs: int
     error_rate: float
+    avg_cost_per_1k: float = 0.0
     composite_score: float = 0.0
 
     def to_dict(self) -> dict:

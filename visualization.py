@@ -76,7 +76,7 @@ def empty_figure(height: int = 80) -> go.Figure:
 # ── Bar Chart: Latency / TTFT / Throughput ──────────────────────────────────
 
 def build_bar_chart(model_stats: _ModelAccumulator) -> go.Figure:
-    names, lat_vals, ttft_vals, tps_vals = [], [], [], []
+    names, lat_vals, ttft_vals, tps_vals, cost_vals = [], [], [], [], []
 
     for mid, bucket in model_stats.items():
         if not bucket.get("latencies"):
@@ -86,6 +86,13 @@ def build_bar_chart(model_stats: _ModelAccumulator) -> go.Figure:
         ttft_vals.append(round(stats.mean(bucket["ttfts"]), 3) if bucket.get("ttfts") else 0.0)
         tps_vals.append(round(stats.mean(bucket["tps_vals"]), 1))
 
+        total_costs = bucket.get("total_costs", [])
+        comp_tokens = bucket.get("comp_tokens", [])
+        avg_cost = stats.mean(total_costs) if total_costs else 0.0
+        avg_tokens = stats.mean(comp_tokens) if comp_tokens else 0
+        cost_per_1k = round(avg_cost / avg_tokens * 1000, 6) if avg_tokens > 0 else 0.0
+        cost_vals.append(cost_per_1k)
+
     if not names:
         return empty_figure()
 
@@ -93,14 +100,19 @@ def build_bar_chart(model_stats: _ModelAccumulator) -> go.Figure:
     traces = []
     for i, name in enumerate(names):
         c = color_for_index(i)
-        
+
         traces.extend([
             go.Bar(x=[name], y=[lat_vals[i]], name=name, marker_color=c, showlegend=True, legendgroup=name, xaxis='x1', yaxis='y1'),
             go.Bar(x=[name], y=[ttft_vals[i]], name=name, marker_color=c, showlegend=False, legendgroup=name, xaxis='x2', yaxis='y2'),
-            go.Bar(x=[name], y=[tps_vals[i]], name=name, marker_color=c, showlegend=False, legendgroup=name, xaxis='x3', yaxis='y3')
+            go.Bar(x=[name], y=[tps_vals[i]], name=name, marker_color=c, showlegend=False, legendgroup=name, xaxis='x3', yaxis='y3'),
+            go.Bar(x=[name], y=[cost_vals[i]], name=name, marker_color=c, showlegend=False, legendgroup=name, xaxis='x4', yaxis='y4'),
         ])
 
-    fig = make_subplots(rows=1, cols=3, subplot_titles=("Avg Latency (s) ↓", "Avg TTFT (s) ↓", "Avg tok/s ↑"), horizontal_spacing=0.08)
+    fig = make_subplots(
+        rows=1, cols=4,
+        subplot_titles=("Avg Latency (s) ↓", "Avg TTFT (s) ↓", "Avg tok/s ↑", "Cost/1K tokens ($) ↓"),
+        horizontal_spacing=0.06,
+    )
     fig.add_traces(traces)
 
     # Global hardware-accelerated state mutation

@@ -59,6 +59,8 @@ def _ingest_and_downcast(all_results: list[BenchmarkResult]) -> pd.DataFrame:
         'prompt_tokens': 'int32[pyarrow]',
         'completion_tokens': 'int32[pyarrow]',
         'total_tokens': 'int32[pyarrow]',
+        'prompt_cost_usd': 'float64[pyarrow]',
+        'completion_cost_usd': 'float64[pyarrow]',
         'error': 'string[pyarrow]',
         'response': 'string[pyarrow]'
     }
@@ -84,12 +86,16 @@ def aggregate_stats(all_results: list[BenchmarkResult]) -> _ModelAccumulator:
         if group.empty:
             continue
             
+        total_costs = (
+            group['prompt_cost_usd'].fillna(0) + group['completion_cost_usd'].fillna(0)
+        ).tolist()
         model_stats[str(mid)] = {
             "name": str(group['model_name'].iloc[0]),
             "latencies": group['latency_sec'].dropna().tolist(),
             "ttfts": group['ttft_sec'].dropna().tolist(),
             "tps_vals": group['tokens_per_sec'].dropna().tolist(),
             "comp_tokens": group['completion_tokens'].dropna().tolist(),
+            "total_costs": total_costs,
             "errors": int(group['error'].notna().sum()),
             "responses": group['response'].dropna().tolist(),
             "total_runs": len(group)
@@ -110,6 +116,7 @@ def build_leaderboard_rows(model_stats: _ModelAccumulator) -> list[LeaderboardRo
         latencies = bucket["latencies"]
         ttfts = bucket["ttfts"]
         comp_tokens = bucket["comp_tokens"]
+        total_costs = bucket.get("total_costs", [])
         total_runs = bucket["total_runs"]
         errors = bucket["errors"]
 
@@ -127,6 +134,11 @@ def build_leaderboard_rows(model_stats: _ModelAccumulator) -> list[LeaderboardRo
         avg_tokens = round(stats.mean(comp_tokens)) if comp_tokens else 0
         error_rate = round(errors / total_runs * 100, 1) if total_runs else 0.0
 
+        avg_total_cost = stats.mean(total_costs) if total_costs else 0.0
+        avg_cost_per_1k = (
+            round(avg_total_cost / avg_tokens * 1000, 6) if avg_tokens > 0 else 0.0
+        )
+
         rows.append(
             LeaderboardRow(
                 model=bucket["name"],
@@ -141,6 +153,7 @@ def build_leaderboard_rows(model_stats: _ModelAccumulator) -> list[LeaderboardRo
                 errors=errors,
                 runs=total_runs,
                 error_rate=error_rate,
+                avg_cost_per_1k=avg_cost_per_1k,
             )
         )
 
@@ -214,7 +227,7 @@ def build_leaderboard_dataframe(
         return pd.DataFrame(
             columns=[
                 "#", "Model", "Latency (s)", "σ Lat", "TTFT (s)",
-                "tok/s", "σ tok/s", "CV%", "Tokens", "Errors", "Runs",
+                "tok/s", "σ tok/s", "CV%", "Tokens", "Cost/1K tokens ($)", "Errors", "Runs",
             ]
         )
 
@@ -231,6 +244,7 @@ def build_leaderboard_dataframe(
             "σ tok/s": row.std_tps,
             "CV%": row.cv_tps,
             "Tokens": row.avg_tokens,
+            "Cost/1K tokens ($)": row.avg_cost_per_1k,
             "Errors": row.errors,
             "Runs": row.runs,
         }
@@ -249,14 +263,15 @@ def build_leaderboard_dataframe(
     # ── Final Layer Type Coercion ──
     arrow_dtypes: dict[str, str] = {
         "#": "string[pyarrow]",
-        "Model": "category",                  # Memory-mapped string references
-        "Latency (s)": "float32[pyarrow]",    # 32-bit float boundaries
+        "Model": "category",                       # Memory-mapped string references
+        "Latency (s)": "float32[pyarrow]",         # 32-bit float boundaries
         "σ Lat": "float32[pyarrow]",
         "TTFT (s)": "float32[pyarrow]",
         "tok/s": "float32[pyarrow]",
         "σ tok/s": "float32[pyarrow]",
         "CV%": "float32[pyarrow]",
-        "Tokens": "int32[pyarrow]",           # 32-bit integer boundaries
+        "Tokens": "int32[pyarrow]",                # 32-bit integer boundaries
+        "Cost/1K tokens ($)": "float64[pyarrow]",  # 64-bit for sub-cent precision
         "Errors": "int32[pyarrow]",
         "Runs": "int32[pyarrow]",
         "Ctx Used": "string[pyarrow]",
